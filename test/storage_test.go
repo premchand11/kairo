@@ -275,3 +275,72 @@ func TestMaxMemoryRejectsNewKey(t *testing.T) {
 		t.Fatalf("used = %d, want 0", store.Used())
 	}
 }
+
+func TestMaxMemoryEvictsSoonestKey(t *testing.T) {
+	store := storage.NewStore()
+	store.SetMaxMemory(12)
+
+	soon := time.Now().Add(10 * time.Second).UnixNano()
+	later := time.Now().Add(time.Minute).UnixNano()
+
+	if !store.Set("a1", storage.Entry{Value: "xxxx", ExpiresAt: soon}) {
+		t.Fatal("expected first key to fit")
+	}
+	if !store.Set("b2", storage.Entry{Value: "xxxx", ExpiresAt: later}) {
+		t.Fatal("expected second key to fit")
+	}
+	if !store.Set("c3", storage.Entry{Value: "xxxx", ExpiresAt: later}) {
+		t.Fatal("expected third key to fit after eviction")
+	}
+
+	if _, ok := store.Get("a1"); ok {
+		t.Fatal("soonest key should have been evicted")
+	}
+	if _, ok := store.Get("b2"); !ok {
+		t.Fatal("later key should stay")
+	}
+	if _, ok := store.Get("c3"); !ok {
+		t.Fatal("new key should be stored")
+	}
+}
+
+func TestMaxMemoryKeepsKeyWithoutExpiry(t *testing.T) {
+	store := storage.NewStore()
+	store.SetMaxMemory(12)
+
+	soon := time.Now().Add(10 * time.Second).UnixNano()
+	later := time.Now().Add(time.Minute).UnixNano()
+
+	if !store.Set("p1", storage.Entry{Value: "xxxx"}) {
+		t.Fatal("expected key without expiry to fit")
+	}
+	if !store.Set("e1", storage.Entry{Value: "xxxx", ExpiresAt: soon}) {
+		t.Fatal("expected expiring key to fit")
+	}
+	if !store.Set("n1", storage.Entry{Value: "xxxx", ExpiresAt: later}) {
+		t.Fatal("expected eviction of the expiring key")
+	}
+
+	if _, ok := store.Get("p1"); !ok {
+		t.Fatal("key without expiry should stay")
+	}
+	if _, ok := store.Get("e1"); ok {
+		t.Fatal("soonest expiring key should be evicted")
+	}
+}
+
+func TestMaxMemoryRejectsKeyLargerThanLimit(t *testing.T) {
+	store := storage.NewStore()
+	store.SetMaxMemory(3)
+
+	soon := time.Now().Add(time.Minute).UnixNano()
+	if !store.Set("a", storage.Entry{Value: "z", ExpiresAt: soon}) {
+		t.Fatal("expected small key to fit")
+	}
+	if store.Set("b", storage.Entry{Value: "12345", ExpiresAt: soon}) {
+		t.Fatal("a key larger than the limit should be rejected")
+	}
+	if _, ok := store.Get("a"); !ok {
+		t.Fatal("existing key should stay when the new key cannot fit alone")
+	}
+}

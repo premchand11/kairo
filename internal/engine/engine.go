@@ -12,8 +12,21 @@ type Engine struct {
 }
 
 func New() *Engine {
+	return NewWithShards(0)
+}
+
+// NewWithShards builds an engine with n map shards.
+// Zero uses the default, 16.
+func NewWithShards(n int) *Engine {
+	var store *storage.Store
+	if n <= 0 {
+		store = storage.NewStore()
+	} else {
+		store = storage.NewStoreWithShards(n)
+	}
+
 	engine := &Engine{
-		store: storage.NewStore(),
+		store: store,
 	}
 
 	engine.ttlWorker = NewTTLWorker(engine)

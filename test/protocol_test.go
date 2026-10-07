@@ -174,3 +174,21 @@ func TestReadCommandRejectsOversizedBulkString(t *testing.T) {
 		t.Fatal("expected error for oversized bulk string")
 	}
 }
+
+func TestReadCommandRejectsNegativeArrayLength(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("*-1\r\n"))
+
+	_, err := protocol.ReadCommand(reader)
+	if err == nil {
+		t.Fatal("expected error for negative array length")
+	}
+}
+
+func TestReadCommandRejectsHugeArrayLength(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("*2000000\r\n"))
+
+	_, err := protocol.ReadCommand(reader)
+	if err == nil {
+		t.Fatal("expected error for huge array length")
+	}
+}

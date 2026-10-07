@@ -161,11 +161,13 @@ With no flag, it grows until keys expire or the machine runs out of RAM. You can
 go run ./cmd/kairo -addr 127.0.0.1:8989 -max-memory 268435456
 ```
 
-That is 256 MiB of the bytes you stored, not of the process. A `SET` that would go past it returns `ERR maxmemory reached` and leaves the old value alone. Deletes and smaller updates still work. Expired keys still get removed, which makes room later.
+That is 256 MiB of the bytes you stored, not of the process. A `SET` that would go past it deletes the key closest to expiring, then stores the new value. Keys with no expiry are left alone. If nothing can be removed, or the new key by itself is bigger than the cap, the `SET` returns `ERR maxmemory reached` and the old value stays. Deletes and smaller updates still work.
 
 Go's map overhead is extra, so the process will be bigger than the number you pass. From the run above, figure about 325 bytes of process RAM per small key once the data is loaded.
 
-When the cap is hit, Kairo does not throw some other key away to make room. It just refuses the write. The TTL is what frees space. I have not built eviction yet.
+`-max-shards` changes how many pieces the key space is split into. The default is 16.
+
+Ctrl-C (`SIGINT` or `SIGTERM`) stops new connections, closes the ones still open, stops the expiry worker, and exits.
 
 ### Restart
 
@@ -181,7 +183,7 @@ go run ./cmd/kairobench
 go test -bench=. -benchmem ./internal/engine ./internal/storage
 ```
 
-`go test ./...` covers the protocol, the server, expiry, the wheel, and the memory cap.
+`go test ./...` covers the protocol, the server, expiry, the wheel, and the memory cap. `go test -race ./...` runs the same tests with the race detector. The RESP parser also has a fuzz target, `FuzzReadCommand`. GitHub Actions runs the tests, the race detector, and `go vet` on every push.
 
 `cmd/kairobench` builds Kairo, starts it on `127.0.0.1:18989`, runs the workload, stops it, then runs the same thing against Redis on `127.0.0.1:16379`. I used those ports so it would not step on a Redis already on 6379 or a Kairo already on 8989. Flags are `-keys`, `-rounds`, `-clients`, `-value-size`, `-ttl`, `-warmup`, and `-duration`.
 
@@ -229,14 +231,19 @@ One connection is still handled one command after another. The extra cores only 
 
 **16 shards.** One shard is one Go map and one lock. The key is hashed, the hash picks the map. Keys on different maps can be touched at the same time. Keys on the same map take turns.
 
-I benchmarked parallel reads of a warm set on this laptop:
+I timed parallel reads of 1,000 warm keys, with the keys already built, on this laptop:
 
-| | time per read |
+| shards | time per read |
 | --- | ---: |
-| 1 shard | 141 ns |
-| 16 shards | 42 ns |
+| 1 | 92 ns |
+| 2 | 56 ns |
+| 4 | 33 ns |
+| 8 | 20 ns |
+| 16 | 13 ns |
+| 32 | 10 ns |
+| 64 | 10 ns |
 
-About 3.4×. That is why 16 stayed and 1 did not. The laptop has 12 CPUs, so 16 pieces is enough that several connections can actually run together. The number is `defaultShardCount` in `internal/storage/store.go`. A bigger machine does not retune it. I did not sweep 8 vs 32 and pick a winner. Sixteen was the split I measured, and it was clearly better than one lock.
+Reads kept getting faster through 32 shards. 64 did not beat 32. The default is still 16, because that is the setting behind the Redis comparison further down. `-max-shards` changes it without a code edit. The constant is `defaultShardCount` in `internal/storage/store.go`. A bigger machine does not retune it.
 
 The hash is FNV-1a, 32-bit. It is small, it does not allocate, and every command runs it, so that matters. `2166136261` and `16777619` are just the standard start value and multiplier for 32-bit FNV-1a. Same key, same shard, for as long as the process is up. If the hash comes out 0 I force it to 1. It is only there to spread keys. It is not hiding anything.
 
@@ -266,9 +273,7 @@ I tried a packed table on this same workload. It used more RAM than the map. The
 
 That is also why a key is about 325 bytes of process RAM here and about 160 in Redis. Most of the gap is the map, not a second copy of the key string. Beating it means a layout that is actually tighter than Go's map on this workload, which the one I tried was not.
 
-**`-max-memory`.** This is the sum of `len(key) + len(value)` across every key. `0` means no limit. All the shards share one counter. A `SET` that would pass the cap is refused before the map changes, so the old value stays. A delete, an expiry, or a smaller value always adjusts the counter down.
-
-As I said above, this is a hard stop. It does not pick a victim and evict it.
+**`-max-memory`.** This is the sum of `len(key) + len(value)` across every key. `0` means no limit. All the shards share one counter. A `SET` that would pass the cap first drops the key with the soonest deadline. That key is already on the wheel, so this does not scan the whole map. Keys that never expire are not dropped. If the new value still does not fit, the write is refused and the previous value stays. A delete, an expiry, or a smaller value always adjusts the counter down.
 
 ## Commands
 
@@ -335,8 +340,9 @@ Smaller timings, same machine, from `go test -bench`:
 
 | | |
 | --- | ---: |
-| Read, 1 shard, many goroutines | 141 ns |
-| Read, 16 shards, many goroutines | 42 ns |
+| Read, 1 shard, many goroutines, precomputed keys | 92 ns |
+| Read, 16 shards, many goroutines, precomputed keys | 13 ns |
+| Read, 32 shards, many goroutines, precomputed keys | 10 ns |
 | SET, no expiry | 76 ns |
 | SET, 1 minute expiry | 165 ns |
 | Refresh a key that stays in the same wheel bucket | 78 ns, nothing allocated |
@@ -370,8 +376,18 @@ Kairo is the narrow gap between a local map and Redis: one shared copy, Redis cl
 
 ## Still open
 
-The per-key RAM is still about twice Redis. I am not going to call this done on memory until something beats Go's map on this workload, and the table I tried did not.
+A key is still about twice the RAM of Redis. The packed table I tried used more than Go's map, so the map stayed. A key that never expires is not evicted. If every key is like that, or the new value alone is bigger than the cap, the write returns an error. There is no password, no disk, and no second machine.
 
-A full cache returns an error. It does not evict.
+## What I would do next
 
-No auth, no disk, no second machine. The section above is where those limits point: Redis or Valkey if it has to survive a restart, a local map if there is only one process, Memcached or one of the multi-threaded Redis-style servers if the shape of the job is different.
+These fit the cache that is already here. They are not a second Redis.
+
+**Reuse the value buffer on overwrite.** Every `SET` of an existing key allocates a new string and leaves the old one for the garbage collector. That is most of the ~9 MiB growth after ten rewrites of 50,000 keys. If the new value fits in the old buffer, copy it in. Redis already does this, which is why its RSS barely moves on the same test.
+
+**Lock a shard once per `MGET`.** Each key currently takes and releases its shard lock on its own. A page that asks for several keys pays that once per key. Group the keys by shard and take each lock once.
+
+**Run the Redis comparison again at 32 shards.** Parallel reads on this laptop were 13 ns at 16 shards and 10 ns at 32, and 64 did not beat 32. The 884k commands/sec number is still the 16-shard binary. I would rerun that same 32-client, pipeline-16 workload with `-max-shards 32` and change the default only if it still wins there.
+
+**A small metrics page.** Counts for commands, hits, misses, evictions, and bytes used, on a separate port. Enough to see the process. Not a tracing project.
+
+I am not planning persistence, replication, `INCR`, lists, or another hash table. Those are different products. Redis, Valkey, or Dragonfly already cover them.

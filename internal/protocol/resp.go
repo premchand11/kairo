@@ -7,7 +7,10 @@ import (
 	"strconv"
 )
 
-const maxBulkStringSize = 1 << 20 // 1 MiB
+const (
+	maxBulkStringSize = 1 << 20 // 1 MiB
+	maxArrayLength    = 1 << 20 // one million arguments
+)
 
 var (
 	crlf      = []byte("\r\n")
@@ -27,7 +30,7 @@ func ReadCommand(r *bufio.Reader) ([]string, error) {
 	}
 
 	count, err := strconv.Atoi(line[1 : len(line)-2])
-	if err != nil {
+	if err != nil || count < 0 || count > maxArrayLength {
 		return nil, fmt.Errorf("invalid array length")
 	}
 

@@ -163,6 +163,30 @@ func BenchmarkStoreConcurrentGet16ShardsPrecomputed(b *testing.B) {
 	})
 }
 
+func BenchmarkStoreShardCount(b *testing.B) {
+	counts := []int{1, 2, 4, 8, 16, 32, 64}
+
+	for _, n := range counts {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			store := NewStoreWithShards(n)
+			keys := make([]string, 1000)
+			for i := range keys {
+				keys[i] = "key:" + strconv.Itoa(i)
+				store.Set(keys[i], Entry{Value: "hello"})
+			}
+
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				i := 0
+				for pb.Next() {
+					_, _ = store.Get(keys[i%len(keys)])
+					i++
+				}
+			})
+		})
+	}
+}
+
 func BenchmarkStoreRefreshTTL(b *testing.B) {
 	store := NewStore()
 

@@ -49,7 +49,9 @@ func hashKey(key string) uint32 {
 }
 
 // SetMaxMemory limits the sum of key and value lengths.
-// Zero means unlimited. A SET that would pass the limit is rejected.
+// Zero means unlimited. A SET that would pass the limit evicts the key
+// closest to expiring, then retries. Keys with no expiry are kept.
+// If nothing can be removed, the SET is rejected.
 func (s *Store) SetMaxMemory(n int64) {
 	s.maxBytes = n
 	for _, shard := range s.shards {
@@ -73,7 +75,53 @@ func (s *Store) Get(key string) (Entry, bool) {
 }
 
 func (s *Store) Set(key string, entry Entry) bool {
-	return s.getShard(key).Set(key, entry)
+	need := int64(len(key) + len(entry.Value))
+	if s.maxBytes > 0 && need > s.maxBytes {
+		return false
+	}
+
+	shard := s.getShard(key)
+	for {
+		if shard.Set(key, entry) {
+			return true
+		}
+		if !s.evictSoonest(key) {
+			return false
+		}
+	}
+}
+
+// evictSoonest deletes the key with the nearest deadline, skipping except.
+// Keys with no expiry are not on the wheel, so they are kept.
+func (s *Store) evictSoonest(except string) bool {
+	for try := 0; try < 3; try++ {
+		var bestShard *Shard
+		var bestKey string
+		var bestExp int64
+		found := false
+
+		for _, shard := range s.shards {
+			key, exp, ok := shard.soonest(except)
+			if !ok {
+				continue
+			}
+			if !found || exp < bestExp {
+				found = true
+				bestShard = shard
+				bestKey = key
+				bestExp = exp
+			}
+		}
+
+		if !found {
+			return false
+		}
+		if bestShard.Delete(bestKey) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s *Store) Delete(key string) bool {
