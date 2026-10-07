@@ -167,6 +167,33 @@ func (s *Shard) expire(bucketSecond int64, now int64) {
 	}
 }
 
+// soonest returns the wheel key with the smallest deadline.
+// except is the key a SET is trying to write, so that update is not deleted
+// to make room for itself.
+func (s *Shard) soonest(except string) (string, int64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var bestKey string
+	var bestExp int64
+	found := false
+
+	for _, bucket := range s.wheel {
+		for _, slot := range bucket {
+			if slot.ExpiresAt <= 0 || slot.Key == except {
+				continue
+			}
+			if !found || slot.ExpiresAt < bestExp {
+				found = true
+				bestKey = slot.Key
+				bestExp = slot.ExpiresAt
+			}
+		}
+	}
+
+	return bestKey, bestExp, found
+}
+
 func (s *Shard) slots(key string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
